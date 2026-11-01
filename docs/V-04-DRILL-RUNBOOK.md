@@ -1,26 +1,32 @@
-# V-04 Operational Drill Runbook v1.2.1
+# V-04 Operational Drill Runbook v1.2.2
 
-**Disposition:** Frozen candidate. v1.2.1 amends the v1.2 evidence package: JWKS artifacts are replaced by non-secret key attestation.  
+**Disposition:** Frozen candidate. v1.2.2 is a consistency patch on v1.2.1. No change to the security model, retirement policy, or acceptance controls.  
 **Date:** 2026-11-01  
 **Status:** Procedure and acceptance criteria defined. Operational execution not demonstrated.
 
 This runbook defines the non-production V-04 key rotation drill. Successful execution closes only the operational validation requirement for the rotation drill. It does not authorize production deployment or close other gates.
 
-## Change Summary from v1.1
+## Change Summary from v1.2.1
 
-- C4 validates both signing authority removal and verification rejection of legacy-signed tokens.
-- Raw JWT artifacts removed from required evidence; metadata and outcomes only.
-- Overlap termination tied to successful deployment and verification of legacy verification-key removal.
-- `key-transition-record.md` mandatory.
-- Confidentiality validation uses organization-approved secret-detection process.
-- Rollback success requires restoration of trust state and validation behavior.
-- Verdict computation formalized (PASS / FAIL / INCONCLUSIVE).
+- Simulation / template packages are explicitly barred from producing a PASS verdict.
+- Attestations must be cross-checked against the key-transition-record timelines; mismatch is a C6 failure.
+- Attestation JSON must contain only the permitted fields; extra fields are a C1 or C6 failure.
+- Supporting generator scripts are tooling only and do not constitute evidence.
 
 ## Change Summary from v1.2
 
-- `jwks-pre.json`, `jwks-post.json`, `jwks-pre-sha256.txt`, and `jwks-post-sha256.txt` are removed.
-- JWKS documents are prohibited in the evidence package.
-- Key state is recorded only as non-secret attestation: `kid`, which env var is set, deploy revision, and the SHA-256 of the non-secret file that was checked. No key bytes.
+- JWKS artifacts removed and prohibited.
+- Key state recorded only as non-secret attestation.
+
+## Change Summary from v1.1
+
+- C4 validates both signing authority removal and verification rejection.
+- Raw JWT artifacts removed.
+- Overlap termination tied to deployment + verifier confirmation.
+- `key-transition-record.md` mandatory.
+- Confidentiality uses organization-approved secret detection.
+- Rollback requires trust-state and validation-behavior restoration.
+- Verdict computation formalized.
 
 ## 1. Drill Scope & Objectives
 
@@ -44,7 +50,7 @@ Execute a non-production V-04 key rotation drill to validate:
 | C5 | Rollback Capability | Rollback restores prior trust state and validation behavior within five minutes |
 | C6 | Audit Integrity | Evidence package complete, attributable, hash-linked and retained |
 
-All controls must PASS.
+All controls must PASS. A simulation or template package cannot satisfy this requirement.
 
 ## 2. Security Model Validated
 
@@ -95,11 +101,12 @@ All four outcomes are required.
 
 ### C1 Confidentiality
 
-Evidence packages shall not contain secret values, private keys, secret exports, credential fragments, JWKS documents, or JWK parameters (`k`, `d`, `n`, `e`, `x`, `y`, `oct`, or any raw key).  
+Evidence packages shall not contain secret values, private keys, secret exports, credential fragments, JWKS documents, or JWK parameters.  
 Validation: organization-approved secret-detection process executed against the complete evidence package prior to archival.  
 Evidence: scanner report + reviewer sign-off.
 
-A SHA-256 of a secret-bearing file is not a substitute for omitting the secret. Hashing an env file, a secret export, a JWKS, or a private-key file is a C1 failure.
+A SHA-256 of a secret-bearing file is not a substitute for omitting the secret. Hashing an env file, a secret export, a JWKS, or a private-key file is a C1 failure.  
+Extra fields in an attestation that could carry secret material are a C1 failure.
 
 ### C2 Key Identification
 
@@ -139,6 +146,9 @@ Failure of any condition results in C5 failure.
 Evidence package must be timestamped, attributable, hash-linked, archived read-only, and reproducible.  
 Evidence: manifest, hash-chain output, archival record.
 
+The four attestations must be consistent with the timelines and matrix in `key-transition-record.md`. Any mismatch is a C6 failure.  
+A package labeled simulation, template, or not-executed cannot be assessed as PASS.
+
 ## 6. Required Evidence Package
 
 ```text
@@ -172,11 +182,11 @@ Evidence: manifest, hash-chain output, archival record.
 └── drill-report.md
 ```
 
-JWKS files are not required and are not permitted. `jwks-pre.json`, `jwks-post.json`, and the former standalone `jwks-*-sha256.txt` files are retired.
+JWKS files are not required and are not permitted.
 
 ## 6.1 Key Attestation (Mandatory)
 
-Each attestation is one JSON object. It records presence, not secrets.
+Each attestation is one JSON object. It records presence, not secrets. No fields other than those listed are permitted.
 
 ```json
 {
@@ -195,13 +205,11 @@ Each attestation is one JSON object. It records presence, not secrets.
 |-------|------|
 | `phase` | `pre-rotation`, `overlap`, `post-retirement`, or `rollback`, matching the filename |
 | `deploy_revision` | Non-empty revision of the deployment that was checked. Not a secret. |
-| `checked_file` | Path of the file that was hashed. It must be a non-secret deploy artifact (revision manifest or redacted config that names env vars only). It must not be an env file, secret export, JWKS, or private-key file. |
-| `checked_file_sha256` | SHA-256 of that file, 64 lowercase hex digits. The hash identifies the checked file. It is not a hash of key material. |
+| `checked_file` | Path of a non-secret deploy artifact. Must not be an env file, secret export, JWKS, or private-key file. |
+| `checked_file_sha256` | SHA-256 of that file, 64 lowercase hex digits. Not a hash of key material. |
 | `keys[].env_var` | `JWT_SECRET` or `JWT_SECRET_PREVIOUS` only. The name, never the value. |
-| `keys[].set` | `true` if that variable is present in the running deployment, `false` if it is unset. |
-| `keys[].kid` | Required when `set` is `true`. Stable identifier only (`key-v1` or `key-v2`). Forbidden when `set` is `false`. |
-
-Both env vars are listed in every phase. No other fields are permitted. In particular, secret values, tokens, and JWK parameters are forbidden.
+| `keys[].set` | `true` if present, `false` if unset. |
+| `keys[].kid` | Required when `set` is `true`. Forbidden when `set` is `false`. |
 
 | File | `JWT_SECRET` | `JWT_SECRET_PREVIOUS` |
 |------|--------------|------------------------|
@@ -210,7 +218,7 @@ Both env vars are listed in every phase. No other fields are permitted. In parti
 | `attestation-post.json` | set, `kid=key-v2` | unset |
 | `attestation-rollback.json` | set, `kid=key-v1` | unset |
 
-A missing attestation, a secret-bearing checked file, a JWKS document, or a key byte in any attestation is an evidence failure (C1 or C6).
+A missing attestation, a secret-bearing checked file, a JWKS document, a key byte, or an extra field in any attestation is an evidence failure (C1 or C6).
 
 ## 7. Key Transition Record (Mandatory)
 
@@ -237,11 +245,13 @@ A missing attestation, a secret-bearing checked file, a JWKS document, or a key 
 | Legacy token post-retirement | FAIL | |
 | Replacement token post-retirement | PASS | |
 
+The Actual column must be populated from operational results. “SIMULATED” or blank is not a PASS.
+
 ## 8. Verdict Determination
 
 ### PASS
 
-All of C1–C6 are PASS.
+All of C1–C6 are PASS, and the package is from an operational non-production drill (not a simulation or template).
 
 ### FAIL
 
@@ -249,7 +259,7 @@ Any acceptance control FAILS.
 
 ### INCONCLUSIVE
 
-Drill not completed, evidence incomplete, validation missing, timestamps missing, audit artifacts missing, or assessment cannot determine PASS or FAIL.
+Drill not completed, evidence incomplete, validation missing, timestamps missing, audit artifacts missing, package is a simulation/template, or assessment cannot determine PASS or FAIL.
 
 ## 9. Go/No-Go Decision Matrix
 
