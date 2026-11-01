@@ -1,21 +1,71 @@
 # Quiet Pan — Secrets Rotation Playbook
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 2026-11-01  
-**Status:** Draft — requires owner review before use  
+**Status:** Draft — requires owner review before freeze  
 **Applies to:** Dual-secret JWT (`JWT_SECRET` / `JWT_SECRET_PREVIOUS`)
 
-This playbook describes the rotation procedure supported by the existing `JwtService` implementation. It does not authorize production use. Execution requires a non-production environment, recorded evidence, and explicit sign-off.
+This playbook describes the rotation procedure supported by the existing `JwtService` implementation. It incorporates the V-04 security clarification distinguishing signing-key selection from verification-key eligibility. It does not authorize production use.
 
 ## Contract (from code)
 
-- **Issue:** always uses `JWT_SECRET` (current).
-- **Verify:** tries `JWT_SECRET`, then `JWT_SECRET_PREVIOUS` if set and non-empty.
+- **Issue (signing-key selection):** always uses `JWT_SECRET` (current / replacement once installed).
+- **Verify (verification-key eligibility):** tries `JWT_SECRET`, then `JWT_SECRET_PREVIOUS` if set and non-empty.
 - `JWT_SECRET_PREVIOUS` must differ from `JWT_SECRET`.
 - Rotation window is active while `JWT_SECRET_PREVIOUS` is present.
 - Algorithm path is HS256 only for the dual-secret implementation.
+- Retirement model: **Option A — Immediate Invalidation**. Clearing `JWT_SECRET_PREVIOUS` removes legacy verification eligibility immediately. Legacy-signed tokens fail validation after retirement.
 
 See `src/auth/jwt.rs`.
+
+## V-04 Security Clarification
+
+The drill must independently verify both functions:
+
+### A. Signing-Key Selection
+
+Which key is used for newly issued tokens.
+
+| Phase | New tokens signed by |
+|-------|----------------------|
+| Pre-transition | Legacy key |
+| Transition window | Replacement key |
+| Post-retirement | Replacement key |
+
+### B. Verification-Key Eligibility
+
+Which keys are authorized for token validation.
+
+| Phase | Legacy-key token | Replacement-key token |
+|-------|------------------|-----------------------|
+| Pre-transition | Accept | Not applicable |
+| Transition window | Accept | Accept |
+| Post-retirement | Reject | Accept |
+
+Authentication success alone is insufficient. Test tokens must have known, recorded signing-key provenance.
+
+## Acceptance Controls (mandatory)
+
+| Control | Requirement |
+|---------|-------------|
+| Secret Confidentiality | Evidence packages shall not contain secret material. |
+| Key Identification | Every test token shall be attributable to a signing-key version or identifier. |
+| Overlap Window | Both authorized verification keys shall validate during the transition period. |
+| Retirement Enforcement | Legacy verification eligibility shall be removed (Option A). |
+| Rollback Procedure | Documented and authorized recovery path shall exist and be testable. |
+| Audit Integrity | Evidence shall be timestamped, attributable, and retained. |
+
+## Retirement Policy
+
+**Selected model: Option A — Immediate Invalidation**
+
+At retirement:
+- Legacy key removed from verification set (`JWT_SECRET_PREVIOUS` unset).
+- Legacy-signed tokens immediately fail validation.
+
+Acceptance test: Post-retirement legacy-token validation = Reject.
+
+Option B (grace-period expiration) is not used by the current implementation. The playbook, code, and assessment criteria use Option A exclusively. No mixed interpretation is permitted.
 
 ## Preconditions
 
@@ -23,7 +73,8 @@ See `src/auth/jwt.rs`.
 - [ ] Current `JWT_SECRET` meets length requirement (≥86 characters).
 - [ ] `docs/PRODUCTION_READINESS.md` checklist reviewed.
 - [ ] Backup of current configuration taken.
-- [ ] Evidence capture method ready (logs, screenshots, or command output archive).
+- [ ] Evidence capture method ready.
+- [ ] Key identifiers assigned (legacy and replacement) without recording secret values.
 
 ## Rotation Procedure
 
@@ -33,69 +84,107 @@ See `src/auth/jwt.rs`.
 openssl rand -base64 64
 ```
 
-Record the new value securely. Do not commit it.
+Record the new value securely outside the evidence package. Assign a key identifier (e.g., `key-v2`). Do not commit the secret.
 
 ### Step 2 — Introduce replacement (start rotation window)
 
-1. Set `JWT_SECRET_PREVIOUS` = current `JWT_SECRET`.
-2. Set `JWT_SECRET` = new value.
-3. Restart or reload the service so `JwtService::from_config` picks up both.
-4. Confirm `is_rotation_window_active()` would return true (previous is set and differs).
+1. Set `JWT_SECRET_PREVIOUS` = current `JWT_SECRET` (legacy identifier recorded).
+2. Set `JWT_SECRET` = new value (replacement identifier recorded).
+3. Restart or reload so `JwtService::from_config` picks up both.
+4. Confirm rotation window active.
 
-**Expected:** New tokens are issued under the new secret. Tokens issued under the old secret still verify.
+**Signing-key selection:** New tokens are signed by the replacement key.  
+**Verification-key eligibility:** Both legacy and replacement tokens must verify.
 
-### Step 3 — Verify legacy acceptance
+### Step 3 — Verify legacy acceptance (verification eligibility)
 
-- Present a token that was issued before the change.
-- Confirm verification succeeds (falls through to previous secret).
-- Record the verification result and timestamp.
+- Present a token known to have been signed by the legacy key.
+- Confirm verification succeeds.
+- Record token identifier, signing-key identifier, timestamp, and result.
 
-### Step 4 — Verify new issuance
+### Step 4 — Verify new issuance (signing-key selection)
 
-- Issue a fresh access token.
-- Confirm it verifies successfully against the current secret.
-- Confirm it would fail if only the previous secret were present (optional negative check).
+- Issue a fresh token.
+- Confirm it is signed by the replacement key (known provenance).
+- Confirm verification succeeds against the current secret.
+- Record token identifier, signing-key identifier, timestamp, and result.
 
-### Step 5 — Retirement
+### Step 5 — Retirement (Option A)
 
-1. After the agreed overlap window (all outstanding tokens expired or re-issued):
-   - Unset `JWT_SECRET_PREVIOUS` (or set to empty).
+1. After the agreed overlap window:
+   - Unset `JWT_SECRET_PREVIOUS`.
 2. Restart or reload.
-3. Confirm tokens issued under the old secret now fail verification.
-4. Confirm tokens issued under the new secret continue to verify.
+3. Confirm legacy-signed token now fails verification.
+4. Confirm replacement-signed token continues to verify.
 
-**Expected:** Rotation window closed. Only the current secret is accepted.
+**Expected:** Legacy verification eligibility removed immediately. Only the replacement key remains authorized.
 
 ### Step 6 — Post-cutover confirmation
 
-- [ ] New tokens issue and verify.
-- [ ] Old tokens reject.
-- [ ] No `JWT_SECRET_PREVIOUS` remains in the running configuration.
+- [ ] New tokens signed by replacement key and verify.
+- [ ] Legacy-signed tokens reject.
+- [ ] No `JWT_SECRET_PREVIOUS` remains in running configuration.
 - [ ] Service health checks pass.
-- [ ] Evidence package archived with Run ID and Commit SHA.
+- [ ] Evidence package complete (see structure below).
+
+## Evidence Package Structure
+
+```text
+evidence/
+├── verification-id.txt
+├── run-id.txt
+├── commit-sha.txt
+├── environment.txt
+├── rotation-plan.md
+├── deployment-logs/
+├── auth-logs/
+├── validation-results/
+├── configuration-diff/
+├── key-transition-record.md
+├── rollback-record.md
+└── assessor-summary.md
+```
+
+### key-transition-record.md minimum contents
+
+- Legacy key identifier
+- Replacement key identifier
+- Active signing-key timeline
+- Active verification-key timeline
+- Transition start timestamp
+- Retirement timestamp
+- Token test matrix (with known provenance)
+- Actual observed results
+- Assessor conclusions
+
+### Configuration evidence shall record
+
+- Key identifiers / version IDs
+- Configuration revision identifiers
+- Deployment timestamps
+- Approval references
+- Environment identifier
+- Commit SHA
+- Run ID
+
+### Configuration evidence shall not contain
+
+- Secret values
+- Secret fragments
+- Secret exports
+- Raw key material
 
 ## Dry-run Checklist
 
-- [ ] Replacement secret generated offline.
-- [ ] Previous secret set equal to old current.
-- [ ] New secret installed as current.
-- [ ] Legacy token accepted during window.
-- [ ] New token issued and accepted.
-- [ ] Previous secret removed.
-- [ ] Legacy token rejected after retirement.
-- [ ] Evidence collected (commands, logs, timestamps, commit SHA).
-
-## Evidence Requirements (for V-04)
-
-| Field              | Required |
-|--------------------|----------|
-| Verification ID    | Yes      |
-| Run ID             | Yes      |
-| Commit SHA         | Yes      |
-| Evidence Package   | Yes      |
-| Reviewer           | Yes      |
-| Date               | Yes      |
-| Result             | Pass / Fail / Inconclusive |
+- [ ] Replacement secret generated offline; identifier assigned.
+- [ ] Previous secret set; legacy identifier recorded.
+- [ ] New secret installed as current; replacement identifier recorded.
+- [ ] Legacy-key token accepted during window (verification eligibility).
+- [ ] Replacement-key token issued and accepted (signing-key selection).
+- [ ] Previous secret removed (Option A retirement).
+- [ ] Legacy-key token rejected after retirement.
+- [ ] Evidence package assembled; no secret material included.
+- [ ] Rollback path tested or confirmed available.
 
 ## Rollback
 
@@ -104,15 +193,16 @@ If verification fails during the window:
 1. Restore `JWT_SECRET` to the prior value.
 2. Clear `JWT_SECRET_PREVIOUS`.
 3. Restart.
-4. Confirm pre-rotation behavior.
-5. Record the failure and do not proceed to retirement.
+4. Confirm pre-rotation signing and verification behavior.
+5. Record the failure in `rollback-record.md` and do not proceed to retirement.
 
 ## Notes
 
 - This playbook covers only the dual-secret JWT path implemented in code.
-- Argon2 parameter changes, Supabase key rotation, and database credential rotation are out of scope for this document.
+- Argon2 parameter changes, Supabase key rotation, and database credential rotation are out of scope.
 - Production execution is prohibited until V-04 evidence is reviewed and the production gate is explicitly authorized.
-- No secrets belong in the repository.
+- Local simulation evidence is supporting implementation evidence only; it does not close V-04.
+- No secrets belong in the repository or in the evidence package.
 
 ## Approval
 
@@ -122,4 +212,4 @@ If verification fails during the window:
 | Security         |      |      |           |
 | Owner            |      |      |           |
 
-Until signed, this remains a draft playbook. Execution does not by itself close V-04.
+Until signed and an operational drill with a complete evidence package is reviewed, V-04 remains Inconclusive and production authorization remains blocked.
