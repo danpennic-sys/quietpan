@@ -1,6 +1,6 @@
-# V-04 Operational Drill Runbook v1.2
+# V-04 Operational Drill Runbook v1.2.1
 
-**Disposition:** Frozen candidate incorporating all accepted V-04 review corrections.  
+**Disposition:** Frozen candidate. v1.2.1 amends the v1.2 evidence package: JWKS artifacts are replaced by non-secret key attestation.  
 **Date:** 2026-11-01  
 **Status:** Procedure and acceptance criteria defined. Operational execution not demonstrated.
 
@@ -15,6 +15,12 @@ This runbook defines the non-production V-04 key rotation drill. Successful exec
 - Confidentiality validation uses organization-approved secret-detection process.
 - Rollback success requires restoration of trust state and validation behavior.
 - Verdict computation formalized (PASS / FAIL / INCONCLUSIVE).
+
+## Change Summary from v1.2
+
+- `jwks-pre.json`, `jwks-post.json`, `jwks-pre-sha256.txt`, and `jwks-post-sha256.txt` are removed.
+- JWKS documents are prohibited in the evidence package.
+- Key state is recorded only as non-secret attestation: `kid`, which env var is set, deploy revision, and the SHA-256 of the non-secret file that was checked. No key bytes.
 
 ## 1. Drill Scope & Objectives
 
@@ -89,17 +95,19 @@ All four outcomes are required.
 
 ### C1 Confidentiality
 
-Evidence packages shall not contain secret values, private keys, secret exports, or credential fragments.  
+Evidence packages shall not contain secret values, private keys, secret exports, credential fragments, JWKS documents, or JWK parameters (`k`, `d`, `n`, `e`, `x`, `y`, `oct`, or any raw key).  
 Validation: organization-approved secret-detection process executed against the complete evidence package prior to archival.  
 Evidence: scanner report + reviewer sign-off.
 
+A SHA-256 of a secret-bearing file is not a substitute for omitting the secret. Hashing an env file, a secret export, a JWKS, or a private-key file is a C1 failure.
+
 ### C2 Key Identification
 
-Every key reference uses `kid=<stable identifier>`. Issuance tests, validation tests, deployment actions, and audit records must be attributable to a specific key.
+Every key reference uses `kid=<stable identifier>`. Issuance tests, validation tests, deployment actions, and audit records must be attributable to a specific key. Attestations record the `kid` and the env var name only.
 
 ### C3 Overlap Window
 
-During the overlap period both key-v1 and key-v2 tokens must be accepted.
+During the overlap period both key-v1 and key-v2 tokens must be accepted. `attestation-overlap.json` must show `JWT_SECRET` set for `key-v2` and `JWT_SECRET_PREVIOUS` set for `key-v1`.
 
 ### C4 Retirement Enforcement
 
@@ -109,6 +117,8 @@ During the overlap period both key-v1 and key-v2 tokens must be accepted.
 | Validation of key-v1 token | Fail |
 | Validation of key-v2 token | Pass |
 | New signing using key-v2 | Pass |
+
+`attestation-post.json` must show `JWT_SECRET` set for `key-v2` and `JWT_SECRET_PREVIOUS` unset.
 
 ### C5 Rollback Capability
 
@@ -122,6 +132,8 @@ Successful only if:
 
 Failure of any condition results in C5 failure.
 
+`attestation-rollback.json` must show `JWT_SECRET` set for `key-v1` and `JWT_SECRET_PREVIOUS` unset.
+
 ### C6 Audit Integrity
 
 Evidence package must be timestamped, attributable, hash-linked, archived read-only, and reproducible.  
@@ -134,10 +146,10 @@ Evidence: manifest, hash-chain output, archival record.
 ├── drill-manifest.yaml
 ├── drill-start.txt
 ├── drill-end.txt
-├── jwks-pre.json
-├── jwks-post.json
-├── jwks-pre-sha256.txt
-├── jwks-post-sha256.txt
+├── attestation-pre.json
+├── attestation-overlap.json
+├── attestation-post.json
+├── attestation-rollback.json
 ├── deploy-timestamp.txt
 ├── overlap-start.txt
 ├── overlap-end.txt
@@ -159,6 +171,46 @@ Evidence: manifest, hash-chain output, archival record.
 ├── compliance-signoff.txt
 └── drill-report.md
 ```
+
+JWKS files are not required and are not permitted. `jwks-pre.json`, `jwks-post.json`, and the former standalone `jwks-*-sha256.txt` files are retired.
+
+## 6.1 Key Attestation (Mandatory)
+
+Each attestation is one JSON object. It records presence, not secrets.
+
+```json
+{
+  "phase": "pre-rotation",
+  "deploy_revision": "<deployment revision>",
+  "checked_file": "<path of the non-secret file that was hashed>",
+  "checked_file_sha256": "<64 lowercase hex digits>",
+  "keys": [
+    {"kid": "key-v1", "env_var": "JWT_SECRET", "set": true},
+    {"env_var": "JWT_SECRET_PREVIOUS", "set": false}
+  ]
+}
+```
+
+| Field | Rule |
+|-------|------|
+| `phase` | `pre-rotation`, `overlap`, `post-retirement`, or `rollback`, matching the filename |
+| `deploy_revision` | Non-empty revision of the deployment that was checked. Not a secret. |
+| `checked_file` | Path of the file that was hashed. It must be a non-secret deploy artifact (revision manifest or redacted config that names env vars only). It must not be an env file, secret export, JWKS, or private-key file. |
+| `checked_file_sha256` | SHA-256 of that file, 64 lowercase hex digits. The hash identifies the checked file. It is not a hash of key material. |
+| `keys[].env_var` | `JWT_SECRET` or `JWT_SECRET_PREVIOUS` only. The name, never the value. |
+| `keys[].set` | `true` if that variable is present in the running deployment, `false` if it is unset. |
+| `keys[].kid` | Required when `set` is `true`. Stable identifier only (`key-v1` or `key-v2`). Forbidden when `set` is `false`. |
+
+Both env vars are listed in every phase. No other fields are permitted. In particular, secret values, tokens, and JWK parameters are forbidden.
+
+| File | `JWT_SECRET` | `JWT_SECRET_PREVIOUS` |
+|------|--------------|------------------------|
+| `attestation-pre.json` | set, `kid=key-v1` | unset |
+| `attestation-overlap.json` | set, `kid=key-v2` | set, `kid=key-v1` |
+| `attestation-post.json` | set, `kid=key-v2` | unset |
+| `attestation-rollback.json` | set, `kid=key-v1` | unset |
+
+A missing attestation, a secret-bearing checked file, a JWKS document, or a key byte in any attestation is an evidence failure (C1 or C6).
 
 ## 7. Key Transition Record (Mandatory)
 
